@@ -1,0 +1,17 @@
+[
+  { "path": "src/core",          "aosp": "platform/system/core",           "upstream": "https://android.googlesource.com/platform/system/core",           "ref": "platform-tools-35.0.2" },
+  { "path": "src/extras",        "aosp": "platform/system/extras",         "upstream": "https://android.googlesource.com/platform/system/extras",         "ref": "platform-tools-35.0.2", "pruned": "ext4_utils, f2fs_utils" },
+  { "path": "src/libbase",       "aosp": "platform/system/libbase",        "upstream": "https://android.googlesource.com/platform/system/libbase",        "ref": "platform-tools-35.0.2" },
+  { "path": "src/logging",       "aosp": "platform/system/logging",        "upstream": "https://android.googlesource.com/platform/system/logging",        "ref": "platform-tools-35.0.2" },
+  { "path": "src/libziparchive", "aosp": "platform/system/libziparchive",  "upstream": "https://android.googlesource.com/platform/system/libziparchive",  "ref": "platform-tools-35.0.2" },
+  { "path": "src/libusb",        "aosp": "platform/external/libusb",       "upstream": "https://android.googlesource.com/platform/external/libusb",       "ref": "platform-tools-35.0.2" },
+  { "path": "src/selinux",       "aosp": "platform/external/selinux",      "upstream": "https://android.googlesource.com/platform/external/selinux",      "ref": "platform-tools-35.0.2", "pruned": "libselinux, libsepol" },
+  { "path": "src/boringssl",     "aosp": "platform/external/boringssl",    "upstream": "https://android.googlesource.com/platform/external/boringssl",    "ref": "platform-tools-35.0.2" },
+  { "path": "src/pcre",          "aosp": "platform/external/pcre",         "upstream": "https://android.googlesource.com/platform/external/pcre",         "ref": "platform-tools-35.0.2" },
+  { "path": "src/fmtlib",        "aosp": "platform/external/fmtlib",       "upstream": "https://android.googlesource.com/platform/external/fmtlib",       "ref": "platform-tools-35.0.2" },
+  { "path": "src/avb",           "aosp": "platform/external/avb",          "upstream": "https://android.googlesource.com/platform/external/avb",          "ref": "platform-tools-35.0.2" },
+  { "path": "src/mkbootimg",     "aosp": "platform/system/tools/mkbootimg","upstream": "https://android.googlesource.com/platform/system/tools/mkbootimg", "ref": "platform-tools-35.0.2" },
+  { "path": "src/soong",         "aosp": "platform/build/soong",           "upstream": "https://android.googlesource.com/platform/build/soong",           "ref": "platform-tools-35.0.2", "pruned": "cc/libbuildversion" },
+  { "path": "src/googletest",    "aosp": "platform/external/googletest",   "upstream": "https://android.googlesource.com/platform/external/googletest",   "ref": "platform-tools-35.0.2", "pruned": "googletest/include" },
+  { "path": "src/zlib",          "aosp": "-",                              "upstream": "https://github.com/madler/zlib",                                   "ref": "v1.3.1" }
+]
