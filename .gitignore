@@ -1,4 +1,3 @@
-build/
-dist/
-pack/
-*.zip
+/build/
+/dist/
+/pack/
