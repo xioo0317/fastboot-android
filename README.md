@@ -49,6 +49,29 @@ fastboot-android/
 | `src/avb` `src/mkbootimg` `src/soong` `src/googletest` | external/avb、system/tools/mkbootimg、build/soong、external/googletest | 头文件 / 版本号 |
 | `src/zlib` | github.com/madler/zlib v1.3.1 | 内置静态 zlib |
 
+## 产物
+
+| ABI | 体积 | 说明 |
+| --- | --- | --- |
+| `arm64-v8a` | 1.5 MB | 主流机型 |
+| `armeabi-v7a` | 1.0 MB | 老 32 位机型 |
+| `x86_64` | 1.6 MB | 模拟器 / x86 设备 |
+
+已验证（NDK r27c，arm64-v8a）：
+
+```
+$ file fastboot
+fastboot: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, stripped
+
+$ llvm-readelf -d fastboot | grep NEEDED
+(无输出 —— 不依赖任何共享库)
+
+$ qemu-aarch64 ./fastboot --version
+fastboot version 35.0.2-
+```
+
+CI 每次 push 都会重编三个 ABI 并上传 artifact。
+
 ## 构建
 
 ### 用 NDK（推荐，产物给手机用）
