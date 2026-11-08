@@ -17,6 +17,20 @@ env:
   NDK_HOME: ${{ github.workspace }}/android-ndk
 
 jobs:
+  # 免 root fd 传递协议互通：host 侧真实 SCM_RIGHTS 回环，先于 NDK 构建给出结论
+  fdpass-interop:
+    name: fdpass interop (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 编译并运行接收端互通测试
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pthread \
+            -I fdpass \
+            tests/fdpass_interop_test.c fdpass/fdpass_recv.c \
+            -o /tmp/fdpass_interop_test
+          /tmp/fdpass_interop_test
+
   build:
     name: ${{ matrix.abi }}
     runs-on: ubuntu-latest

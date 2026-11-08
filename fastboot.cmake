@@ -63,6 +63,8 @@ add_executable(fastboot
     ${SRC}/core/fastboot/usb_linux.cpp
     ${SRC}/core/fastboot/vendor_boot_img_utils.cpp
     ${SRC}/core/fastboot/util.cpp
+    # 免 root fd 传递接收端（xioo0317/fdpass 协议），纯 C，静态链接友好
+    ${PROJECT_SOURCE_DIR}/fdpass/fdpass_recv.c
     )
 
 target_include_directories(fastboot PRIVATE
@@ -80,6 +82,7 @@ target_include_directories(fastboot PRIVATE
     ${SRC}/mkbootimg/include/bootimg
     ${SRC}/core/diagnose_usb/include
     ${SRC}/googletest/googletest/include
+    ${PROJECT_SOURCE_DIR}/fdpass
     )
 target_compile_definitions(fastboot PRIVATE
     -DANDROID_BASE_UNIQUE_FD_DISABLE_IMPLICIT_CONVERSION

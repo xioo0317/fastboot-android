@@ -52,6 +52,20 @@
 #include "usb.h"
 #include "util.h"
 
+/*
+ * 免 root fd 传递接收端（xioo0317/fdpass 协议）。
+ * App 侧 libfdpass.so 通过 SCM_RIGHTS 把已授权的 usbfs fd 传进来：
+ *   MOMIUI_USB_SOCK=@name → connect 抽象 socket → recvmsg 取 fd
+ * 未注入时 fdpass_recv_usbfs_fd() 立即返回 FDPASS_RECV_NO_ENV，
+ * 下面 find_usb_device() 的原生 sysfs 扫描路径完全不变（root / PC 行为 100% 兼容）。
+ */
+extern "C" {
+int fdpass_recv_usbfs_fd(void);
+int fdpass_devfs_path(int fd, char* out, size_t out_size);
+int fdpass_sysfs_name(int fd, char* out, size_t out_size);
+}
+#define FDPASS_RECV_NO_ENV (-100)
+
 using namespace std::chrono_literals;
 
 #define MAX_RETRIES 2
@@ -367,6 +381,49 @@ static std::unique_ptr<usb_handle> find_usb_device(const char* base, ifc_match_f
     struct dirent *de;
     int fd;
     int writable;
+
+    /*
+     * 免 root：优先接收 fdpass 传来的 usbfs fd。
+     * 未注入（环境变量未设置）时立即返回 FDPASS_RECV_NO_ENV，继续走原生扫描。
+     */
+    int injected_fd = fdpass_recv_usbfs_fd();
+    if (injected_fd >= 0) {
+        std::unique_ptr<usb_handle> injected(new usb_handle());
+        char desc[1024];
+        /* usbfs 允许直接 read 出 device + config 描述符，与原生 open 后读取一致 */
+        ssize_t nr = read(injected_fd, desc, sizeof(desc));
+        char sysfs_name[64] = "fdpass";
+        fdpass_sysfs_name(injected_fd, sysfs_name, sizeof(sysfs_name));
+        int in = -1, out = -1, ifc = -1;
+        if (nr > 0 &&
+            filter_usb_device(sysfs_name, desc, (int)nr, 1, callback, &in, &out, &ifc) == 0) {
+            /*
+             * 对齐魔改二进制：detach 内核驱动 + claim interface。
+             * App 侧 UsbFdSession 明确不 claim，故这里必须自己 claim，否则 USBDEVFS
+             * 传输会被 EBUSY 拒绝。USBDEVFS_DISCONNECT_CLAIM 一步完成 detach+claim，
+             * 老内核不支持时回退到 DISCONNECT + CLAIMINTERFACE 两步。
+             */
+            /* flags=0 → 无条件 detach 内核驱动并 claim；对齐 libusb 的
+             * detach_kernel_driver_and_claim。不要用 EXCEPT_DRIVER：它要求配合
+             * driver[]="usbfs" 才有意义，空 driver 反而可能导致不 claim。 */
+            struct usbdevfs_disconnect_claim claim = {};
+            claim.interface = (unsigned int)ifc;
+            claim.flags = 0;
+            if (ioctl(injected_fd, USBDEVFS_DISCONNECT_CLAIM, &claim) != 0) {
+                ioctl(injected_fd, USBDEVFS_DISCONNECT, nullptr);
+                unsigned int ifc_id = (unsigned int)ifc;
+                ioctl(injected_fd, USBDEVFS_CLAIMINTERFACE, &ifc_id);
+            }
+            memset(injected.get(), 0, sizeof(usb_handle));
+            fdpass_devfs_path(injected_fd, injected->fname, sizeof(injected->fname));
+            injected->ep_in = (unsigned char)in;
+            injected->ep_out = (unsigned char)out;
+            injected->desc = injected_fd;
+            return injected;
+        }
+        /* 描述符解析失败：关掉 fd，回退原生扫描（不要泄漏） */
+        close(injected_fd);
+    }
 
     std::unique_ptr<DIR, decltype(&closedir)> busdir(opendir(base), closedir);
     if (busdir == 0) return 0;

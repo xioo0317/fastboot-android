@@ -109,6 +109,54 @@ adb shell /data/local/tmp/fastboot devices
 USB 访问需要有权限的进程（root 或者走 Android USB Host API 拿到 fd），
 在 root shell / Termux 里直接运行即可；普通应用请配合 OZJFLASH 这类自带 USB 授权的容器使用。
 
+## 免 root：fdpass 接收端（FB 传递）
+
+本仓库的 fastboot 现已内置 **fd 传递接收端**，与自有实现
+[`xioo0317/fdpass`](https://github.com/xioo0317/fdpass)（App 侧 `libfdpass.so`）协议一致，
+不再需要 MOFLASH 的魔改二进制。
+
+**两端分工**
+
+| 端 | 位置 | 职责 |
+| --- | --- | --- |
+| 发送端 | App 侧 `libfdpass.so`（`xioo0317/fdpass`） | `serveFdLoop(fd, "@name")` 起抽象 Unix socket，把已授权的 usbfs fd 用 `SCM_RIGHTS` 发出 |
+| 接收端 | **本仓库** `fdpass/fdpass_recv.c` | `connect` 抽象 socket → `recvmsg(SCM_RIGHTS)` 取 fd，交给原生 `usb_linux.cpp` 做 USBDEVFS 传输 |
+
+**运行环境**（由 App 侧注入，与 OZJFLASH `ToolConsole` 一致）
+
+```bash
+MOMIUI_USB_SOCK=@momiui_fb_<nanoTime>   # fastboot 每条命令随机名
+MOMIUI_USB_FD=<fd>                      # 同进程退化路径（跨进程无效，仅兼容保留）
+```
+
+**行为约定**
+
+- **未设置上述环境变量时，原生 sysfs 扫描路径 100% 不变**（root / PC / Termux 行为完全一致，零开销）。
+- 设置时：`find_usb_device()` 优先接收 fd → 直接 `read` usbfs 描述符 → 复用原生
+  `filter_usb_device()` 解析 `ep_in/ep_out/ifc` → `USBDEVFS_DISCONNECT_CLAIM` 自己 detach+claim
+  （App 侧不 claim，避免 EBUSY）→ 用 `/proc/self/fd/N` 反查真实 devfs 路径供 `WaitForDisconnect`。
+- 反查失败时退化为占位 sysfs 名，只影响 serial 显示，不影响端点解析与刷写。
+- `connect` 失败重试 `101 × 20ms`（约 2s），与魔改二进制一致，容忍 App 侧服务稍晚启动。
+
+**协议契约**（与 `xioo0317/fdpass::fdpass_core.c` 逐字对齐）
+
+| 项 | 值 |
+| --- | --- |
+| 地址 | `sockaddr_un` 抽象命名空间：`sun_path[0]=0`，`@` 后名字复制到 `sun_path+1`，`addrlen=strlen+3` |
+| 报文 | 1 字节数据 `0x66` + `SCM_RIGHTS`，`cmsg_len=20` / `msg_controllen=24` |
+| 请求 | 接收端先 `write` 1 字节触发发送端的 `poll(2s)` |
+
+**本地验证**（不需要 NDK / Android 设备）
+
+```bash
+cc -std=c11 -O2 -Wall -Wextra -Werror -pthread -I fdpass \
+   tests/fdpass_interop_test.c fdpass/fdpass_recv.c -o /tmp/fdpass_interop_test
+/tmp/fdpass_interop_test      # ALL PASS
+```
+
+该测试内置最小发送端（复刻 `serveFdLoop` 协议），用 pipe 验证收到的 fd 指向同一内核对象；
+CI 的 `fdpass-interop` job 每次 push 都会跑一遍，再编译三个 ABI。
+
 ## 许可
 
 - 构建工程（CMake 文件）来自 [lzhiyong/android-sdk-tools](https://github.com/lzhiyong/android-sdk-tools)，Apache-2.0
