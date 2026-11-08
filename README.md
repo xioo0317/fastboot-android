@@ -115,6 +115,19 @@ USB 访问需要有权限的进程（root 或者走 Android USB Host API 拿到 
 [`xioo0317/fdpass`](https://github.com/xioo0317/fdpass)（App 侧 `libfdpass.so`）协议一致，
 不再需要 MOFLASH 的魔改二进制。
 
+### USB 后端归属（重要）
+
+| 二进制 | USB 后端 | fd 注入点 |
+| --- | --- | --- |
+| MOFLASH 魔改 `libfastboot.so` | **libusb 后端**（`src/libusb/libusb/os/linux_usbfs.c`） | `get_usbfs_fd()`：把 `open("/dev/bus/usb/%03u/%03u")` 换成收 fd，再走 `/proc/self/fd/<fd>` 反查 + `detach_kernel_driver_and_claim` |
+| **本仓库标准版 fastboot** | **AOSP 原生 usbfs 后端** `src/core/fastboot/usb_linux.cpp`（`USBDEVFS_*` ioctl + `/dev/bus/usb/%03d/%03d`） | `find_usb_device()` 开头 |
+
+注意：仓库里虽然有 `src/libusb/libusb` 和 `lib/libusb.cmake`，但那个 `libusb` 静态库
+**没有链接进 `fastboot` 目标**（`fastboot.cmake` 的 `target_link_libraries` 里没有它），
+且仓库不含 `usb_libusb.cpp`。即 `src/libusb/libusb` 在当前构建中是**死代码**，
+改它不会生效；标准版真正编译进可执行文件的 USB 后端只有 `usb_linux.cpp`。
+两套后端只是「怎么打开设备」不同，fd 传递的协议层（`MOMIUI_USB_*` + `SCM_RIGHTS`）完全相同。
+
 **两端分工**
 
 | 端 | 位置 | 职责 |
@@ -131,12 +144,21 @@ MOMIUI_USB_FD=<fd>                      # 同进程退化路径（跨进程无�
 
 **行为约定**
 
-- **未设置上述环境变量时，原生 sysfs 扫描路径 100% 不变**（root / PC / Termux 行为完全一致，零开销）。
-- 设置时：`find_usb_device()` 优先接收 fd → 直接 `read` usbfs 描述符 → 复用原生
-  `filter_usb_device()` 解析 `ep_in/ep_out/ifc` → `USBDEVFS_DISCONNECT_CLAIM` 自己 detach+claim
-  （App 侧不 claim，避免 EBUSY）→ 用 `/proc/self/fd/N` 反查真实 devfs 路径供 `WaitForDisconnect`。
+- **未设置上述环境变量时，原生 sysfs 扫描路径 100% 不变**（root / PC / Termux 行为完全一致，零开销，也不打印任何诊断）。
+- 设置时：`find_usb_device()` 优先接收 fd → **先 `lseek(fd,0,SEEK_SET)` 复位共享文件偏移**再 `read`
+  usbfs 描述符（`SCM_RIGHTS` 传的是同一 open file description，App 侧可能已读过导致偏移非 0）；
+  read 不足时从 `/sys/bus/usb/devices/<name>/descriptors` 兜底（对齐 libusb 后端做法）
+  → 复用原生 `filter_usb_device()` 解析 `ep_in/ep_out/ifc` → `USBDEVFS_DISCONNECT_CLAIM`
+  自己 detach+claim（App 侧不 claim，避免 EBUSY）→ 用 `/proc/self/fd/N` 反查真实 devfs 路径供
+  `WaitForDisconnect`。
 - 反查失败时退化为占位 sysfs 名，只影响 serial 显示，不影响端点解析与刷写。
 - `connect` 失败重试 `101 × 20ms`（约 2s），与魔改二进制一致，容忍 App 侧服务稍晚启动。
+- **socket 通道失败时回退 `MOMIUI_USB_FD`**（对齐魔改 so 的 `0x298ba8` 分支）：App 侧
+  `getFileDescriptor()` 的 usbfs fd 通常不带 `CLOEXEC`，`ProcessBuilder` fork+exec 后 fd 号不变，
+  子进程可直接沿用。真机日志「socket 未在 1.5s 内就绪，但有 FB=5」正是这一路径。
+- 全过程带 `[fdpass]` 前缀诊断输出到 stderr（App 的 `redirectErrorStream(true)` 会捕获），
+  依次报告 connect、SCM_RIGHTS fd、`/proc/self/fd` 反查、描述符来源、filter 结果、
+  claim 结果，便于定位 `< waiting for any device >`。
 
 **协议契约**（与 `xioo0317/fdpass::fdpass_core.c` 逐字对齐）
 
@@ -155,7 +177,29 @@ cc -std=c11 -O2 -Wall -Wextra -Werror -pthread -I fdpass \
 ```
 
 该测试内置最小发送端（复刻 `serveFdLoop` 协议），用 pipe 验证收到的 fd 指向同一内核对象；
-CI 的 `fdpass-interop` job 每次 push 都会跑一遍，再编译三个 ABI。
+另覆盖「无环境变量」「非法 socket 名」「`MOMIUI_USB_FD` 退化」「socket 失败回退 FD」
+「socket 失败且无 FD」五条分支。CI 的 `fdpass-interop` job 每次 push 都会跑一遍，再编译三个 ABI。
+
+也可用自有发送端源码做真实交叉互通：
+
+```bash
+cc -std=c11 -O2 -Wall -Wextra -Werror -pthread \
+   -I fdpass -I /path/to/fdpass/src \
+   /path/to/fdpass/src/fdpass_core.c fdpass/fdpass_recv.c <驱动 main> -o /tmp/xcheck
+```
+
+### 排障：`< waiting for any device >`
+
+该提示来自 `fastboot.cpp::open_device()` 的轮询，含义是 `usb_open()` 没拿到 handle。按 `[fdpass]`
+诊断行逐段判断：
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 只有 `connect ... 超时` | App 侧 `serveFdLoop` 没起来 / `waitSocketReady` 1.5s 超时 | 确认 `libfdpass.so` 已换为自有源码编译版、`FdPass` 包名 `com.Android.MoFlash.data` 与 JNI 符号一致；工具侧重试 2s 会自动兜底 |
+| `退化使用 MOMIUI_USB_FD=N → 非 usbfs` | 跨 exec 后该 fd 号不是 usbfs | 以 socket 通道为主；检查 App 是否提前关闭了 `UsbDeviceConnection` |
+| `usbfs read 仅 0 字节` | App 侧已读过描述符，共享偏移非 0 | 已由 `lseek(0)` + sysfs 兜底自动处理 |
+| `filter_usb_device rc=-1` | VID/PID 或接口非 `FF/42/03`（可能设备不在 fastboot 模式） | 用 `UsbFdTracer.interfaces()` 确认接口类别 |
+| 完全没有 `[fdpass]` 行 | 环境变量没注入到工具进程 | 检查 `ProcessBuilder.environment()` |
 
 ## 许可
 

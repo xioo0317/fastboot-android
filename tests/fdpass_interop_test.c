@@ -167,6 +167,42 @@ static int test_env_fd_fallback(void) {
     return ok ? 0 : 1;
 }
 
+/*
+ * 真机诊断日志「socket 未在 1.5s 内就绪，但有 MOMIUI_USB_FD=5」的场景：
+ * socket 名合法却无人 listen，工具侧必须回退到 MOMIUI_USB_FD，
+ * 而不是直接返回 connect 错误码让 find_usb_device 掉进 < waiting for any device >。
+ * 用最小重试次数把 101×20ms 缩短，避免测试拖慢 2 秒。
+ */
+static int test_socket_fail_fallback_fd(void) {
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return 1;
+    char num[32];
+    snprintf(num, sizeof(num), "%d", pipefd[0]);
+    setenv(FDPASS_ENV_SOCK, "@fba_no_such_server_for_test", 1);
+    setenv(FDPASS_ENV_FD, num, 1);
+    setenv("FDPASS_CONNECT_RETRIES", "2", 1);
+    int got = fdpass_recv_usbfs_fd();
+    printf("[sock-fail→fd] got_fd=%d (期望 %d)\n", got, pipefd[0]);
+    unsetenv("FDPASS_CONNECT_RETRIES");
+    unsetenv(FDPASS_ENV_SOCK);
+    unsetenv(FDPASS_ENV_FD);
+    int ok = (got == pipefd[0]);
+    close(pipefd[0]); close(pipefd[1]);
+    return ok ? 0 : 1;
+}
+
+/* 只有 socket 名、FD 无效时，应返回 socket 错误码而不是 NO_ENV */
+static int test_socket_fail_no_fd(void) {
+    setenv(FDPASS_ENV_SOCK, "@fba_no_such_server_for_test", 1);
+    unsetenv(FDPASS_ENV_FD);
+    setenv("FDPASS_CONNECT_RETRIES", "2", 1);
+    int got = fdpass_recv_usbfs_fd();
+    printf("[sock-fail]   ret=%d (期望 <0 且 != NO_ENV)\n", got);
+    unsetenv("FDPASS_CONNECT_RETRIES");
+    unsetenv(FDPASS_ENV_SOCK);
+    return (got < 0 && got != FDPASS_RECV_NO_ENV) ? 0 : 1;
+}
+
 int main(void) {
     printf("fdpass 接收端 ↔ 自有 fdpass 发送端 互通测试\n");
     printf("CMSG_LEN=%zu CMSG_SPACE=%zu (arm64 契约 20/24)\n",
@@ -177,6 +213,8 @@ int main(void) {
     fail += test_bad_name();
     fail += test_real_transfer();
     fail += test_env_fd_fallback();
+    fail += test_socket_fail_fallback_fd();
+    fail += test_socket_fail_no_fd();
 
     if ((size_t)CMSG_LEN(sizeof(int)) != 20 || (size_t)CMSG_SPACE(sizeof(int)) != 24) {
         printf("[cmsg]        FAIL 尺寸不符\n");

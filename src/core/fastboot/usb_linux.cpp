@@ -66,6 +66,45 @@ int fdpass_sysfs_name(int fd, char* out, size_t out_size);
 }
 #define FDPASS_RECV_NO_ENV (-100)
 
+/* 注入态诊断：与 fdpass_recv.c 的 [fdpass] 前缀一致，App 终端可见。
+ * 由 fdpass 接收端 g_diag_enabled 判据的同一组环境变量控制。 */
+#define FDPASS_LOG(...)                                        \
+    do {                                                       \
+        if (getenv("MOMIUI_USB_SOCK") || getenv("MOMIUI_USB_FD")) { \
+            fprintf(stderr, "[fdpass] " __VA_ARGS__);           \
+            fputc('\n', stderr);                                \
+            fflush(stderr);                                     \
+        }                                                        \
+    } while (0)
+
+/* 从 sysfs 读设备/配置描述符，作为 usbfs read() 的兜底。
+ * 对齐魔改 libfastboot.so（libusb 后端 linux_get_device_address / sysfs descriptors）：
+ * App 侧 UsbDeviceConnection 可能已读过 usbfs fd，跨 SCM_RIGHTS 后文件偏移非 0，
+ * 直接 read() 会返回 0，此时 /sys/bus/usb/devices/<name>/descriptors 才是可靠来源。 */
+static ssize_t fdpass_read_descriptors(int usbfs_fd, const char* sysfs_name,
+                                       char* desc, size_t desc_size) {
+    /* 先复位共享文件偏移（SCM_RIGHTS 传的是同一 open file description，偏移共享） */
+    (void)lseek(usbfs_fd, 0, SEEK_SET);
+    ssize_t n = read(usbfs_fd, desc, desc_size);
+    if (n > (ssize_t)USB_DT_DEVICE_SIZE) {
+        FDPASS_LOG("usbfs read 得到 %zd 字节描述符", n);
+        return n;
+    }
+    FDPASS_LOG("usbfs read 仅 %zd 字节（偏移/权限），回退 sysfs descriptors", n);
+
+    char path[160];
+    snprintf(path, sizeof(path), "/sys/bus/usb/devices/%s/descriptors", sysfs_name);
+    int sfd = open(path, O_RDONLY);
+    if (sfd < 0) {
+        FDPASS_LOG("打开 %s 失败 errno=%d (%s)", path, errno, strerror(errno));
+        return n > 0 ? n : -1;
+    }
+    ssize_t sn = read(sfd, desc, desc_size);
+    close(sfd);
+    FDPASS_LOG("sysfs %s 读到 %zd 字节", path, sn);
+    return sn > 0 ? sn : (n > 0 ? n : -1);
+}
+
 using namespace std::chrono_literals;
 
 #define MAX_RETRIES 2
@@ -387,16 +426,27 @@ static std::unique_ptr<usb_handle> find_usb_device(const char* base, ifc_match_f
      * 未注入（环境变量未设置）时立即返回 FDPASS_RECV_NO_ENV，继续走原生扫描。
      */
     int injected_fd = fdpass_recv_usbfs_fd();
+    if (injected_fd < 0 && injected_fd != FDPASS_RECV_NO_ENV) {
+        FDPASS_LOG("接收 fd 失败 ret=%d，回退原生 sysfs 扫描（免 root 下通常会失败）",
+                   injected_fd);
+    }
     if (injected_fd >= 0) {
         std::unique_ptr<usb_handle> injected(new usb_handle());
         char desc[1024];
-        /* usbfs 允许直接 read 出 device + config 描述符，与原生 open 后读取一致 */
-        ssize_t nr = read(injected_fd, desc, sizeof(desc));
         char sysfs_name[64] = "fdpass";
-        fdpass_sysfs_name(injected_fd, sysfs_name, sizeof(sysfs_name));
+        int name_rc = fdpass_sysfs_name(injected_fd, sysfs_name, sizeof(sysfs_name));
+        FDPASS_LOG("fd=%d sysfs_name=%s (rc=%d)", injected_fd, sysfs_name, name_rc);
+
+        /* 先复位偏移再读；失败时从 sysfs descriptors 兜底（对齐 libusb 后端） */
+        ssize_t nr = fdpass_read_descriptors(injected_fd, sysfs_name, desc, sizeof(desc));
         int in = -1, out = -1, ifc = -1;
-        if (nr > 0 &&
-            filter_usb_device(sysfs_name, desc, (int)nr, 1, callback, &in, &out, &ifc) == 0) {
+        int filter_rc = (nr > 0)
+                            ? filter_usb_device(sysfs_name, desc, (int)nr, 1,
+                                                callback, &in, &out, &ifc)
+                            : -1;
+        FDPASS_LOG("filter_usb_device rc=%d ep_in=0x%02x ep_out=0x%02x ifc=%d",
+                   filter_rc, in, out, ifc);
+        if (filter_rc == 0) {
             /*
              * 对齐魔改二进制：detach 内核驱动 + claim interface。
              * App 侧 UsbFdSession 明确不 claim，故这里必须自己 claim，否则 USBDEVFS
@@ -409,19 +459,24 @@ static std::unique_ptr<usb_handle> find_usb_device(const char* base, ifc_match_f
             struct usbdevfs_disconnect_claim claim = {};
             claim.interface = (unsigned int)ifc;
             claim.flags = 0;
-            if (ioctl(injected_fd, USBDEVFS_DISCONNECT_CLAIM, &claim) != 0) {
+            int claim_rc = ioctl(injected_fd, USBDEVFS_DISCONNECT_CLAIM, &claim);
+            if (claim_rc != 0) {
                 ioctl(injected_fd, USBDEVFS_DISCONNECT, nullptr);
                 unsigned int ifc_id = (unsigned int)ifc;
                 ioctl(injected_fd, USBDEVFS_CLAIMINTERFACE, &ifc_id);
             }
+            FDPASS_LOG("claim interface #%d: %s (errno=%d)", ifc,
+                       claim_rc == 0 ? "DISCONNECT_CLAIM OK" : "回退两步 claim", errno);
             memset(injected.get(), 0, sizeof(usb_handle));
             fdpass_devfs_path(injected_fd, injected->fname, sizeof(injected->fname));
             injected->ep_in = (unsigned char)in;
             injected->ep_out = (unsigned char)out;
             injected->desc = injected_fd;
+            FDPASS_LOG("usb_open 成功：%s", injected->fname);
             return injected;
         }
         /* 描述符解析失败：关掉 fd，回退原生扫描（不要泄漏） */
+        FDPASS_LOG("设备匹配失败（VID/PID 或接口 FF/42/03 不符），关闭 fd=%d", injected_fd);
         close(injected_fd);
     }
 
